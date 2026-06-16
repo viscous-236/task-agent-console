@@ -122,6 +122,17 @@ export const useAgentStore = create<AgentStore>()(
 
     initAgentStream(stream_id: string) {
       set((draft) => {
+        // 8.1 chaos hardening: on RESUME replay, the server may re-send TOKEN
+        // events for a stream_id that already has an AgentMessage in the store.
+        // Guard against creating a duplicate — simply reactivate the existing one.
+        const existing = draft.messages.find(
+          (m): m is AgentMessage => m.role === 'assistant' && m.id === stream_id,
+        );
+        if (existing !== undefined) {
+          draft.activeStreamId = stream_id;
+          return;
+        }
+
         const msg: AgentMessage = {
           id: stream_id,
           role: 'assistant',
