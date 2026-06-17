@@ -89,7 +89,12 @@ export const useAgentStore = create<AgentStore>()(
 
     setLastProcessedSeq(seq: number) {
       set((draft) => {
-        if (seq > draft.lastProcessedSeq) {
+        // seq === -1 is an explicit reset signal (sent on new USER_MESSAGE
+        // so the next turn starts fresh). All other values use Math.max so
+        // out-of-order drains never move the cursor backward.
+        if (seq === -1) {
+          draft.lastProcessedSeq = -1;
+        } else if (seq > draft.lastProcessedSeq) {
           draft.lastProcessedSeq = seq;
         }
       });
@@ -151,6 +156,10 @@ export const useAgentStore = create<AgentStore>()(
           (m): m is AgentMessage => m.role === 'assistant' && m.id === stream_id,
         );
         if (!msg) return; // graceful no-op if stream not found
+        // Replay guard: don't append to an already-complete stream.
+        // This prevents token duplication when the server restarts fresh
+        // (seq reset) and re-sends events for a stream we already finished.
+        if (msg.isComplete) return;
 
         const lastSegment = msg.segments[msg.segments.length - 1];
         if (lastSegment !== undefined && lastSegment.kind === 'text') {
@@ -169,6 +178,9 @@ export const useAgentStore = create<AgentStore>()(
             m.role === 'assistant' && m.id === msg.stream_id,
         );
         if (!agentMsg) return;
+        // Replay guard: don't add a tool call that already exists.
+        // Prevents duplicate tool cards on reconnect replay.
+        if (agentMsg.toolCalls[msg.call_id] !== undefined) return;
 
         const record: ToolCallRecord = {
           call_id: msg.call_id,

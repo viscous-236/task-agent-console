@@ -14,7 +14,6 @@ import {
 
 import type {
   ClientMessage,
-  ConnectionState,
   ServerMessage,
   TokenMessage,
   ToolCallMessage,
@@ -39,7 +38,7 @@ import type {
 export interface UseWebSocketReturn {
   send: (msg: ClientMessage) => void;
   disconnect: () => void;
-  connectionState: ConnectionState;
+  connectionState: string;
 }
 
 // ─── Hook ──────────────────────────────────────────────────────────────────────
@@ -56,6 +55,9 @@ export function useWebSocket(): UseWebSocketReturn {
   // Keep a live ref to lastProcessedSeq so the closure inside onclose reads
   // the current value without stale captures.
   const lastProcessedSeqRef = useRef<number>(-1);
+  // Set to true immediately after sending RESUME so the first incoming message
+  // can be inspected for a server-seq-reset condition.
+  const isFirstMsgAfterResumeRef = useRef<boolean>(false);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -86,8 +88,9 @@ export function useWebSocket(): UseWebSocketReturn {
     switch (msg.type) {
       case 'TOKEN': {
         const m = msg as TokenMessage;
-        // If no AgentMessage exists for this stream yet, initialise it first
-        const hasStream = store.messages.some(
+        // If no AgentMessage exists for this stream yet, initialise it first.
+        // Use getState() to read live state (store ref in closure is stale).
+        const hasStream = useAgentStore.getState().messages.some(
           (cm) => cm.role === 'assistant' && cm.id === m.stream_id,
         );
         if (!hasStream) {
@@ -149,10 +152,9 @@ export function useWebSocket(): UseWebSocketReturn {
         const m = msg as ContextSnapshotMessage;
         store.addContextSnapshot(m);
 
-        // Determine snapshotIndex: it will be the current length of the array
-        // after insertion. The store auto-sets contextViewIndex, so we read back.
+        // Determine snapshotIndex: read live state after insertion.
         const snapshotIndex =
-          (store.contextSnapshots[m.context_id]?.length ?? 1) - 1;
+          (useAgentStore.getState().contextSnapshots[m.context_id]?.length ?? 1) - 1;
 
         const snapshotEvent: ContextSnapshotEvent = {
           id: crypto.randomUUID(),
@@ -169,6 +171,9 @@ export function useWebSocket(): UseWebSocketReturn {
       case 'PING': {
         const m = msg as PingMessage;
 
+        // NOTE: the PONG is sent immediately in the onmessage handler (before
+        // SeqBuffer processing) to guarantee the 3-second deadline is always met.
+        // processMessage is only responsible for the timeline events here.
         const pingEvent: PingEvent = {
           id: crypto.randomUUID(),
           seq: m.seq,
@@ -177,10 +182,6 @@ export function useWebSocket(): UseWebSocketReturn {
           challenge: m.challenge,
         };
         store.addTimelineEvent(pingEvent);
-
-        // Respond immediately — empty challenge is valid, echo it back as-is
-        const pongMsg: ClientMessage = { type: 'PONG', echo: m.challenge };
-        safeSendRaw(serializeClientMessage(pongMsg));
 
         const pongEvent: PongEvent = {
           id: crypto.randomUUID(),
@@ -191,7 +192,6 @@ export function useWebSocket(): UseWebSocketReturn {
         };
         store.addTimelineEvent(pongEvent);
 
-        // Reset the PONG watchdog timer
         clearPongWatchdog();
         break;
       }
@@ -210,6 +210,10 @@ export function useWebSocket(): UseWebSocketReturn {
         };
         store.addTimelineEvent(streamEndEvent);
         store.setConnectionState('connected');
+
+        // Reset reconnect attempt only on full stream completion so exponential
+        // backoff accumulates correctly through rapid chaos drops within a turn.
+        store.resetReconnectAttempt();
         break;
       }
 
@@ -233,13 +237,14 @@ export function useWebSocket(): UseWebSocketReturn {
     }
   }
 
-  // ── Disconnect & reconnect helpers (defined before connect) ────────────────
+  // ── Disconnect & reconnect helpers ────────────────────────────────────────
 
   function scheduleReconnect(attempt: number, lastSeq: number): void {
     const delay = Math.min(
-      RECONNECT_BACKOFF_BASE_MS * Math.pow(2, attempt),
+      RECONNECT_BACKOFF_BASE_MS * Math.pow(2, attempt - 1),
       RECONNECT_BACKOFF_MAX_MS,
     );
+    console.log(`[WS] Reconnect attempt ${attempt} in ${delay}ms (last_seq=${lastSeq})`);
     backoffTimerRef.current = setTimeout(() => {
       connect(lastSeq);
     }, delay);
@@ -249,17 +254,37 @@ export function useWebSocket(): UseWebSocketReturn {
 
   function connect(lastSeq: number): void {
     clearBackoffTimer();
+
+    // ── Clean up the previous WebSocket before opening a new one ─────────
+    // Null handlers BEFORE calling close() so the server-initiated
+    // close (code 1000, reason 'replaced') that the server sends when a new
+    // connection supersedes an old one does NOT trigger handleClose on the
+    // old socket and kick off a spurious reconnect cycle.
+    const oldWs = wsRef.current;
+    if (oldWs !== null) {
+      oldWs.onopen = null;
+      oldWs.onmessage = null;
+      oldWs.onclose = null;
+      oldWs.onerror = null;
+      if (
+        oldWs.readyState === WebSocket.OPEN ||
+        oldWs.readyState === WebSocket.CONNECTING
+      ) {
+        oldWs.close();
+      }
+    }
+
     store.setConnectionState('connecting');
 
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      store.setConnectionState('connected');
-
+      // Stream-level messages (TOKEN etc.) will update state further.
       if (lastSeq >= 0) {
-        // Reconnect scenario — send RESUME as the very first message
+        // Reconnect scenario — send RESUME as the very first message.
         store.setConnectionState('resuming');
+
         const resumeMsg: ClientMessage = { type: 'RESUME', last_seq: lastSeq };
         ws.send(serializeClientMessage(resumeMsg));
 
@@ -271,9 +296,14 @@ export function useWebSocket(): UseWebSocketReturn {
           last_seq: lastSeq,
         };
         store.addTimelineEvent(resumeEvent);
-      }
 
-      store.resetReconnectAttempt();
+        // Arm the first-message check so we can detect server seq reset
+        // and transition out of 'resuming' state.
+        isFirstMsgAfterResumeRef.current = true;
+      } else {
+        // Fresh connection
+        store.setConnectionState('connected');
+      }
     };
 
     ws.onmessage = (event: MessageEvent<string>) => {
@@ -281,6 +311,59 @@ export function useWebSocket(): UseWebSocketReturn {
       if (parsed === null) {
         console.warn('[WS] Unparseable message received:', event.data);
         return;
+      }
+
+      // ── PING bypass ───────────────────────────────────────────────────────
+      // Send PONG immediately, BEFORE the SeqBuffer, to guarantee the 3-second
+      // deadline is always met.  This is critical for two failure modes:
+      //
+      //   (a) Seq gap in the buffer: the PING is held waiting for an earlier
+      //       message; without the bypass it would time out in the buffer.
+      //
+      //   (b) Server seq reset (e.g. container restart with no history): the
+      //       server emits from seq=1 while our SeqBuffer.lastProcessed is 21.
+      //       Every message including PINGs is silently dropped, so no PONG
+      //       is ever sent → server terminates after 3 missed PONGs.
+      //
+      // processMessage (called after SeqBuffer drain) still runs for PINGs
+      // that pass through the buffer — it logs the timeline events only
+      // (no second PONG is sent there).
+      if (parsed.type === 'PING') {
+        const ping = parsed as PingMessage;
+        safeSendRaw(serializeClientMessage({ type: 'PONG', echo: ping.challenge }));
+      }
+
+      // ── Detect server seq reset after RESUME ──────────────────────────────
+      // When the server is restarted fresh (docker stop/start, no history),
+      // it resets its seq counter to 0 and emits from seq=1.  If our
+      // SeqBuffer.lastProcessed is still the pre-restart value (e.g. 21),
+      // ALL incoming messages are silently dropped as "duplicates".
+      //
+      // Detection: the FIRST message received after sending RESUME has
+      // seq ≤ lastProcessed  →  the server reset its counter.
+      // Action: reset the SeqBuffer to 0 so all new messages are accepted.
+      //
+      // This flag is only checked once per RESUME (cleared on first message),
+      // which avoids false positives from chaos-mode duplicate replays during
+      // normal reconnections where the server does have history (in that case
+      // the first replayed event always has seq > lastProcessed).
+      if (isFirstMsgAfterResumeRef.current) {
+        isFirstMsgAfterResumeRef.current = false;
+        
+        // Transition out of 'resuming' state per the strict state machine spec.
+        if (useAgentStore.getState().connectionState === 'resuming') {
+          store.setConnectionState('connected');
+        }
+
+        const currentLastProcessed = seqBufferRef.current.getLastProcessed();
+        if (parsed.seq > 0 && parsed.seq <= currentLastProcessed) {
+          console.log(
+            `[WS] Server seq reset detected (got seq=${parsed.seq}, lastProcessed=${currentLastProcessed}). Resetting SeqBuffer to 0.`,
+          );
+          seqBufferRef.current.reset(0);
+          lastProcessedSeqRef.current = 0;
+          store.setLastProcessedSeq(-1); // allow the store to track fresh from 0
+        }
       }
 
       seqBufferRef.current.insert(parsed);
@@ -291,11 +374,27 @@ export function useWebSocket(): UseWebSocketReturn {
       }
 
       const newLastSeq = seqBufferRef.current.getLastProcessed();
-      store.setLastProcessedSeq(newLastSeq);
       lastProcessedSeqRef.current = newLastSeq;
+      store.setLastProcessedSeq(newLastSeq);
     };
 
     const handleClose = (ev: CloseEvent | Event) => {
+      // ── Identity guard ────────────────────────────────────────────────────
+      // When the server closes the OLD socket with code 1000/reason 'replaced'
+      // (because a new connection came in), this handleClose fires via the
+      // closure even though we already nulled ws.onclose in connect() cleanup.
+      // The server-initiated close frame was already in-flight on the network.
+      // Guard: only act if this ws is still the ACTIVE socket.
+      if (wsRef.current !== ws) {
+        return;
+      }
+
+      // Null handlers immediately to prevent onerror + onclose double-fire.
+      ws.onclose = null;
+      ws.onerror = null;
+
+      isFirstMsgAfterResumeRef.current = false; // clear stale flag on disconnect
+
       console.warn('[WS] Connection closed/errored:', ev);
       store.flushTokenBatch();
 
@@ -303,7 +402,8 @@ export function useWebSocket(): UseWebSocketReturn {
         store.setConnectionState('reconnecting');
         store.incrementReconnectAttempt();
 
-        const attempt = store.reconnectAttempt; // read after increment
+        // Read live state after increment (store ref in closure is stale)
+        const attempt = useAgentStore.getState().reconnectAttempt;
         const reconnectEvent: ReconnectEvent = {
           id: crypto.randomUUID(),
           seq: 0,
@@ -326,8 +426,19 @@ export function useWebSocket(): UseWebSocketReturn {
   // ── Public API ─────────────────────────────────────────────────────────────
 
   const send = useCallback((msg: ClientMessage): void => {
+    if (msg.type === 'USER_MESSAGE') {
+      // The server resets its seq counter to 0 on each USER_MESSAGE, so the
+      // next turn starts at seq=1.  Reset BOTH the SeqBuffer AND the
+      // lastProcessedSeqRef — if we only reset the buffer, a second message
+      // after a drop would RESUME with the stale high seq from the first turn,
+      // and the server (now at seq=1) would replay nothing.
+      seqBufferRef.current.reset(0);
+      lastProcessedSeqRef.current = 0;
+      store.setLastProcessedSeq(-1); // allow store to track fresh from 0
+      store.resetReconnectAttempt(); // new turn = fresh backoff counter
+    }
     safeSendRaw(serializeClientMessage(msg));
-  }, []);
+  }, [store]);
 
   const disconnect = useCallback((): void => {
     intentionalCloseRef.current = true;
@@ -349,6 +460,8 @@ export function useWebSocket(): UseWebSocketReturn {
       clearPongWatchdog();
       const ws = wsRef.current;
       if (ws !== null) {
+        ws.onopen = null;
+        ws.onmessage = null;
         ws.onclose = null;
         ws.onerror = null;
         ws.close();

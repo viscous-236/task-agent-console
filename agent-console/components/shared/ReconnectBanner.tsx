@@ -12,13 +12,13 @@ export function ReconnectBanner() {
 
   useEffect(() => {
     if (connectionState === 'reconnecting') {
-      // Only show banner after RECONNECT_INDICATOR_DELAY_MS (500ms) —
-      // avoids flickering on transient drops
+      // Only show banner after RECONNECT_INDICATOR_DELAY_MS (500ms) to avoid
+      // flickering on transient drops
       timerRef.current = setTimeout(() => {
         setVisible(true);
       }, RECONNECT_INDICATOR_DELAY_MS);
     } else {
-      // Connected again (or other state) — clear timer and start fade-out
+      // Connected again (or other state) — clear timer and hide
       if (timerRef.current !== null) {
         clearTimeout(timerRef.current);
         timerRef.current = null;
@@ -46,7 +46,6 @@ export function ReconnectBanner() {
         bg-orange-950/90 border border-orange-500/30
         shadow-lg shadow-orange-900/30 backdrop-blur-sm
         text-sm text-orange-200
-        animate-in fade-in slide-in-from-top-2 duration-300
       "
     >
       {/* Spinner */}
@@ -68,9 +67,7 @@ export function ReconnectBanner() {
           d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
         />
       </svg>
-      <span className="font-medium">
-        Reconnecting…
-      </span>
+      <span className="font-medium">Reconnecting…</span>
       <span className="text-orange-300/70 text-xs font-mono">
         (attempt {reconnectAttempt})
       </span>

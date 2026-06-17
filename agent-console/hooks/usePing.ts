@@ -63,12 +63,15 @@ export function usePing(): void {
   }, [connectionState]);
 
   // ── Reset watchdog on every new PING event ────────────────────────────────
+  // We count the number of ping events in the timeline. If it increases, we
+  // received a new ping. This avoids race conditions where a ping and token
+  // arrive in the same render batch and the ping isn't the very last event.
+  const pingCount = timelineEvents.filter((e) => e.eventType === 'ping').length;
 
   useEffect(() => {
-    const lastEvent = timelineEvents[timelineEvents.length - 1];
-    if (lastEvent?.eventType === 'ping') {
+    if (pingCount > 0) {
       startWatchdog();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timelineEvents]);
+  }, [pingCount]);
 }

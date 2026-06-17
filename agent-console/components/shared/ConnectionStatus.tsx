@@ -6,20 +6,20 @@ import type { ConnectionState } from '@/lib/types';
 
 interface StateConfig {
   label: string;
-  dot: string;   // dot colour class
-  text: string;  // text colour class
-  ring: string;  // badge border class
+  dot: string;
+  text: string;
+  ring: string;
 }
 
 const STATE_CONFIG: Record<ConnectionState, StateConfig> = {
-  idle:             { label: 'Idle',         dot: 'bg-gray-500',   text: 'text-gray-400',   ring: 'border-gray-500/30'   },
-  connecting:       { label: 'Connecting',   dot: 'bg-yellow-400 animate-pulse', text: 'text-yellow-300', ring: 'border-yellow-500/30' },
-  connected:        { label: 'Connected',    dot: 'bg-green-400',  text: 'text-green-300',  ring: 'border-green-500/30'  },
-  streaming:        { label: 'Streaming',    dot: 'bg-green-400 animate-pulse', text: 'text-green-300', ring: 'border-green-500/30' },
-  tool_call_pending:{ label: 'Tool Running', dot: 'bg-yellow-400 animate-pulse', text: 'text-yellow-300', ring: 'border-yellow-500/30' },
-  reconnecting:     { label: 'Reconnecting', dot: 'bg-red-400 animate-pulse',   text: 'text-red-300',   ring: 'border-red-500/30'   },
-  resuming:         { label: 'Resuming',     dot: 'bg-yellow-400 animate-pulse', text: 'text-yellow-300', ring: 'border-yellow-500/30' },
-  closed:           { label: 'Closed',       dot: 'bg-gray-600',  text: 'text-gray-500',   ring: 'border-gray-600/30'   },
+  idle:              { label: 'Idle',         dot: 'bg-gray-500',                      text: 'text-gray-400',   ring: 'border-gray-500/30'   },
+  connecting:        { label: 'Connecting',   dot: 'bg-yellow-400 animate-pulse',       text: 'text-yellow-300', ring: 'border-yellow-500/30' },
+  connected:         { label: 'Connected',    dot: 'bg-green-400',                      text: 'text-green-300',  ring: 'border-green-500/30'  },
+  streaming:         { label: 'Streaming',    dot: 'bg-green-400 animate-pulse',         text: 'text-green-300',  ring: 'border-green-500/30'  },
+  tool_call_pending: { label: 'Tool Running', dot: 'bg-yellow-400 animate-pulse',       text: 'text-yellow-300', ring: 'border-yellow-500/30' },
+  reconnecting:      { label: 'Reconnecting', dot: 'bg-red-400 animate-pulse',          text: 'text-red-300',    ring: 'border-red-500/30'    },
+  resuming:          { label: 'Resuming',     dot: 'bg-yellow-400 animate-pulse',       text: 'text-yellow-300', ring: 'border-yellow-500/30' },
+  closed:            { label: 'Closed',       dot: 'bg-gray-600',                       text: 'text-gray-500',   ring: 'border-gray-600/30'   },
 };
 
 export function ConnectionStatus() {
